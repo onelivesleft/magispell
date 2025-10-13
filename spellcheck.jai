@@ -151,17 +151,13 @@ main :: () {
     init_key_tracker(*left_control, VK_LCONTROL);
     init_key_tracker(*right_control, VK_RCONTROL);
 
-    //print("running spellcheck test\n");
-    //err := test_spellcheck();
-    //print("err = %\n", err);
-
     font_height :: 16;
     font = Simp.get_font_at_size(".", "KarminaBoldItalic.otf", font_height);
 
     window_width :: 300;
     window_height :: 100;
     window = create_window(window_width, window_height, "Global Spellchecker");
-    Simp.simp_init(window, window_width, window_height, window_width, window_height);
+    //Simp.simp_init(window, window_width, window_height, window_width, window_height);
 
     hook = SetWindowsHookExA(WH_KEYBOARD_LL, keyboard_hook, null, 0);
     if !hook  exit(1);
@@ -173,7 +169,7 @@ main :: () {
 
 
     while !should_quit {
-        frame_time = get_time();
+        frame_time = seconds_since_init();
         frame_index += 1;
         did_something := false;
 
@@ -377,7 +373,7 @@ translate_to_keystroke_string :: (s: string) -> string {
         append(*builder, output_char);
     }
     if caps_mode  append(*builder, "s");
-    return builder_to_string(*builder, __temporary_allocator);
+    return builder_to_string(*builder,, temp);
 }
 
 generate_keystroke :: (virtual_code: u16, direction: type_of(Key_To_Emit.direction)) {
@@ -461,7 +457,6 @@ INPUT :: struct {
 }
 
 LONG :: u64;
-WORD :: u16;
 WCHAR :: u16;
 VK_LALT :: VK_LMENU;
 
@@ -497,7 +492,7 @@ SendInput :: (cInputs: u32, pInputs: *INPUT, cbSize: s32) -> u32 #foreign user32
 CoUninitialize :: () -> void    #foreign Ole32;
 CoInitializeEx :: (pvReserved: *void, dwCoInit: DWORD) -> HRESULT #foreign Ole32;
 CoCreateInstance :: (rclsid: REFCLSID, pUnkOuter: *IUnknown, dwClsContext: CLSCTX, riid: REFIID, ppv: **void) -> HRESULT #foreign Ole32;
-// In File, if we stop using file: CoTaskMemFree :: (ptr: *void) #foreign Ole32;
+CoTaskMemFree :: (ptr: *void) #foreign Ole32;
 
 using CLSCTX :: enum_flags u32 {
     CLSCTX_INPROC_SERVER    :: 0x1;
@@ -533,125 +528,14 @@ using CLSCTX :: enum_flags u32 {
     CLSCTX_SERVER   :: CLSCTX_INPROC_SERVER|CLSCTX_LOCAL_SERVER|CLSCTX_REMOTE_SERVER;
 }
 
-user32 :: #foreign_system_library "user32";
-kernel32 :: #foreign_system_library "kernel32";
-Ole32 :: #foreign_system_library "Ole32";
+user32 :: #system_library "user32";
+kernel32 :: #system_library "kernel32";
+Ole32 :: #system_library "Ole32";
 
 REFCLSID :: *IID;
 WH_KEYBOARD :: 2;
 WH_KEYBOARD_LL :: 13;
 COINIT_MULTITHREADED :: 0;
-
-test_spellcheck :: () -> failed: bool {
-    hr := CoInitializeEx(null, COINIT_MULTITHREADED);
-    if (hr < 0) {
-        print("CoInitializeEx failed: 0x%\n", cast(*void)hr);
-        return true;
-    }
-    defer CoUninitialize();
-
-    factory: *ISpellCheckerFactory;
-    hr = CoCreateInstance(*CLSID_SpellCheckerFactory, null, CLSCTX_INPROC_SERVER, *IID_ISpellCheckerFactory, cast(**void)*factory);
-    if (hr < 0) {
-        print("CoCreateInstance failed: 0x%\n", cast(*void)hr);
-        return true;
-    }
-    print("factory = %\n", factory);
-    defer SpellCheckerFactory_Release(factory);
-
-
-    // Check if en-US is supported
-    supported := false;
-    hr = SpellCheckerFactory_IsSupported(factory, utf8_to_wide("en-US"), *supported);
-    if (hr < 0 || !supported) {
-        print("en-US not supported: 0x%\n", cast(*void)hr);
-        return true;
-    }
-    print("supported = %\n", supported);
-
-    // List supported languages
-    languages: *IEnumString;
-    hr = SpellCheckerFactory_GetSupportedLanguages(factory, *languages);
-    if (hr < 0) {
-        print("GetSupportedLanguages failed: 0x%\n", cast(*void)hr);
-        return true;
-    }
-    print("languages = %\n", languages);
-
-    if languages {
-        while true {
-            language: *WCHAR;
-            sf: u32;
-            hr = languages.vtbl.Next(languages, 1, *language, *sf);
-            if (hr == S_OK && sf == 1) {
-                print("Language: %\n", language);
-                CoTaskMemFree(language);
-            } else {
-                break;
-            }
-        }
-    }
-
-    // Create spell checker
-    checker: *ISpellChecker;
-    hr = SpellCheckerFactory_CreateSpellChecker(factory, utf8_to_wide("en-US"), *checker);
-    if (hr < 0) {
-        print("CreateSpellChecker failed: 0x%\n", cast(*void)hr);
-        return true;
-    }
-    print("checker = %\n", checker);
-
-    // Check sample text "usa" (should suggest "USA", "use", etc.)
-    text := utf8_to_wide("usa");
-    errors: *IEnumSpellingError;
-    hr = SpellChecker_Check(checker, text, *errors);
-    if (hr < 0) {
-        print("Check failed: 0x%\n", cast(*void)hr);
-        return true;
-    }
-    print("errors = %\n", errors);
-
-    // Enumerate errors and get suggestions
-    while true {
-        error: *ISpellingError;
-        fetched: u32;
-        hr = errors.vtbl.Next(errors, 1, *error, *fetched);
-        if (hr == S_OK && fetched == 1) {
-            // Get error position (basic; extend for full ISpellingError vtable)
-            start, len: u64;
-            // Assume vtable calls: error->lpVtbl->get_StartIndex(error, &start);
-            // error->lpVtbl->get_Length(error, &len);
-
-            // Get suggestions
-            word := cast(*WCHAR)(text + start);  // Simplified
-            suggestions: *IEnumString;
-            SpellChecker_Suggest(checker, word, *suggestions);  // Note: Re-query checker if released
-            if (suggestions) {
-                while true {
-                    sug: *WCHAR;
-                    sf: u32;
-                    hr = suggestions.vtbl.Next(suggestions, 1, *sug, *sf);
-                    if (hr == S_OK && sf == 1) {
-                        print("Suggestion: %\n", sug);
-                        CoTaskMemFree(sug);
-                    } else {
-                        break;
-                    }
-                }
-                suggestions.vtbl.Release(xx suggestions);
-            }
-
-            error.vtbl.Release(xx error);  // Assuming IUnknown
-        } else {
-            break;
-        }
-    }
-    errors.vtbl.Release(xx errors);
-
-    CoUninitialize();
-    print("Spell check complete.\n");
-    return false;
-}
 
 word_blob: string;
 words: [] string;
@@ -664,7 +548,7 @@ read_dictionary :: () {
     for word: split(data, "\n") {
         trimmed := trim(word);
         append(*builder, trimmed);
-        to_lower(trimmed);
+        to_lower_in_place(trimmed);
         append(*builder, trimmed);
         array_add(*lengths, trimmed.count);
     }
@@ -728,7 +612,7 @@ get_nearest_word :: (s: string) -> string, score: int {
     nearest_word: string;
     nearest_score := 999999999;
     lower_s := copy_temporary_string(s);
-    to_lower(lower_s);
+    to_lower_in_place(lower_s);
     caseless_match: string;
     for word: words {
         if lower_s == lower_words[it_index]
