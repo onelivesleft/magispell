@@ -1,22 +1,43 @@
+// TODO
+// [x] Switch to windows spellchecker
+// [x] Select dictionary
+// [x] Menu upgrades
+//  [x] Move preferred languages to main menu, above the fold
+//  [x] Section breaks
+//  [x] Checkmarks
+// [ ] Cycle suggestions on subsequent presses
+// [ ] User hotkeys for word selection
+//  [ ] Per-process specific?
+// [ ] User select word keystring
+//  [ ] Initially: left/right/both ctrl + double/triple press?
+//  [ ] Subsequently: choose hotkey
+// [ ] Popup suggestions menu
+// [ ] Store config
+// [ ] Maybe allow user to check currently selected text?
+// [ ] SFX
+
+APPLICATION_NAME :: "Magispell";
+VERSION :: "v0.01";
+APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
+RELEASE_MODE : enum {RELEASE; DEBUG;} : .DEBUG;
+
+#if RELEASE_MODE == .RELEASE then #run disable_runtime_console();
+
+
+#import "GUI";
+
 #import "Basic";
 #import "Clipboard";
 #import "File";
 #import "Math";
-#import "String";
-#import "System";
+#import "Strings";
 #import "Windows";
-#import "Window_Creation";
-#import "Windows_Resources";
 #import "Windows_Utf8";
-Input :: #import "Input";
-Simp :: #import "Simp";
 
-#load "windows_spellchecker.jai";
+Spell_Checker :: #import "Windows_Spell_Checker";
 
 
-window: Window_Type;
 hook: HHOOK;
-font: *Simp.Dynamic_Font;
 
 Keyboard_Event :: struct {
     event_id: WPARAM;
@@ -35,9 +56,6 @@ control_is_down := false;
 double_press_interval :: 0.2;
 small_press_interval :: 1.0 / 1000;
 large_press_interval :: 3.0 / 1000;
-
-frame_index: int;
-frame_time: float64;
 
 old_clipboard_value := "";
 clipboard_sentinel :: "!#@";
@@ -92,15 +110,15 @@ update_key_tracker :: (using key_tracker: *Key_Tracker, key_event: Keyboard_Even
             consecutive_press_count = 0;
     }
     else if key_event.event_id == WM_KEYDOWN {
-        consecutive_pressed_interval = frame_time - last_pressed_at;
-        last_pressed_frame_index = frame_index;
-        last_pressed_at = frame_time;
+        consecutive_pressed_interval = frame.time - last_pressed_at;
+        last_pressed_frame_index = frame.index;
+        last_pressed_at = frame.time;
         consecutive_press_count += 1;
         is_down = true;
     }
     else if key_event.event_id == WM_KEYUP {
-        last_released_frame_index = frame_index;
-        last_released_at = frame_time;
+        last_released_frame_index = frame.index;
+        last_released_at = frame.time;
         is_down = false;
     }
 }
@@ -131,7 +149,11 @@ key_emit_queue: [128] Key_To_Emit;
 key_emit_head: int;
 key_emit_tail: int;
 
-//#run disable_runtime_console();
+spell_check_results: [] Spell_Checker.Spell_Check_Results;
+word_to_check: string;
+last_suggested_word: string;
+user_preferred_languages: [..] Menu_Item;
+other_supported_languages: [..] Menu_Item;
 
 state: enum {
     DORMANT;
@@ -143,62 +165,56 @@ state: enum {
     SENDING_NO_REPLACE_KEYCODES;
 }
 
+should_quit := false;
 
 main :: () {
-    read_dictionary();
-    init_levenshtein();
+    Spell_Checker.init();
+    defer Spell_Checker.deinit();
+    refresh_language_menus();
 
     init_key_tracker(*left_control, VK_LCONTROL);
     init_key_tracker(*right_control, VK_RCONTROL);
 
-    font_height :: 16;
-    font = Simp.get_font_at_size(".", "KarminaBoldItalic.otf", font_height);
-
-    window_width :: 300;
-    window_height :: 100;
-    window = create_window(window_width, window_height, "Global Spellchecker");
-    //Simp.simp_init(window, window_width, window_height, window_width, window_height);
+    window_width :: 512;
+    window_height :: 512;
+    application_panel := gui_create_application_window(APPLICATION_NAME_AND_VERSION, window_width, window_height, flags=.DEFAULT|.START_MINIMIZED|.HAS_NOTIFICATION_ICON|.HIDE_FROM_TASKBAR);
 
     hook = SetWindowsHookExA(WH_KEYBOARD_LL, keyboard_hook, null, 0);
     if !hook  exit(1);
-
-    should_quit := false;
 
     base_color :: Vector4.{.15, .08, .08, 1};
     color: Vector4;
 
 
     while !should_quit {
-        frame_time = seconds_since_init();
-        frame_index += 1;
-        did_something := false;
-
-        Input.update_window_events();
-        for event: Input.events_this_frame {
-            if event.type == .QUIT  should_quit = true;
-
-            if event.type == {
-                case .TEXT_INPUT;
-                case .DRAG_AND_DROP_FILES;
-            }
-        }
+        should_quit = gui_begin_frame();
+        frame.no_sleep = true;
 
         if key_events_tail != key_events_head {
             while key_events_tail != key_events_head {
-                key_events_tail = (key_events_tail + 1) % key_events.count;
-                key_event := key_events[key_events_tail];
+                key_events_tail += 1;
+                index := key_events_tail % key_events.count;
+                key_event := key_events[index];
                 for key_trackers  update_key_tracker(it, key_event);
             }
         }
 
+        if gui_notification_icon_was_clicked() {
+            gui_system_menu(
+                .[ menu_item(APPLICATION_NAME, is_default=true) ],
+                user_preferred_languages,
+                .[ menu_item("Exit", quit, icon=.SUB_MENU_CLOSE) ]
+            );
+        }
+
         if state == .DORMANT {
-            if left_control.last_pressed_frame_index == frame_index {
+            if left_control.last_pressed_frame_index == frame.index {
                 if left_control.consecutive_press_count == 2 && left_control.consecutive_pressed_interval <= double_press_interval
                     state = .WAITING_FOR_KEY_RELEASE;
                     active_key_tracker = *left_control;
             }
 
-            if right_control.last_pressed_frame_index == frame_index {
+            if right_control.last_pressed_frame_index == frame.index {
                 if right_control.consecutive_press_count == 2 && right_control.consecutive_pressed_interval <= double_press_interval
                     state = .WAITING_FOR_KEY_RELEASE;
                     active_key_tracker = *right_control;
@@ -206,12 +222,11 @@ main :: () {
         }
 
         if state == .WAITING_FOR_KEY_RELEASE {
-            if active_key_tracker.last_released_frame_index == frame_index
+            if active_key_tracker.last_released_frame_index == frame.index
                 state = .TRIGGERED;
         }
 
         if state == .TRIGGERED {
-            did_something = true;
             if old_clipboard_value  free(old_clipboard_value);
             old_clipboard_value = os_clipboard_get_text();
             os_clipboard_set_text(clipboard_sentinel);
@@ -224,34 +239,80 @@ main :: () {
         if state == .SENDING_FETCH_WORD_KEYCODES {
             still_sending := send_next_key();
             if !still_sending {
-                fetched_clipboard_at = frame_time;
+                fetched_clipboard_at = frame.time;
                 state = .WAITING_FOR_WORD;
             }
         }
 
         if state == .WAITING_FOR_WORD {
-            if frame_time - fetched_clipboard_at > clipboard_fetch_timeout {
+            if frame.time - fetched_clipboard_at > clipboard_fetch_timeout {
                 show_error("Timed out waiting for clipboard to change.");
                 state = .DORMANT;
             }
             else {
                 clipboard_text := os_clipboard_get_text();
                 if clipboard_text != clipboard_sentinel {
-                    print("Asked to check word: %\n", clipboard_text);
-                    corrected, score := get_nearest_word(clipboard_text);
-                    if score < 3 {
-                        print("Trying to correct to: %\n", corrected);
-                        os_clipboard_set_text(corrected);
+                    fetched_clipboard_at = 0;
+
+                    found_last_suggested_word := false;
+
+                    if spell_check_results && spell_check_results[0].replacement_suggestions && last_suggested_word && clipboard_text == last_suggested_word {
+                        if last_suggested_word == word_to_check {
+                            free(last_suggested_word);
+                            last_suggested_word = copy_string(spell_check_results[0].replacement_suggestions[0]);
+                            found_last_suggested_word = true;
+                        }
+                        else {
+                            set_last_suggested_word := false;
+                            for result: spell_check_results {
+                                for suggestion: result.replacement_suggestions {
+                                    if found_last_suggested_word {
+                                        free(last_suggested_word);
+                                        last_suggested_word = copy_string(suggestion);
+                                        set_last_suggested_word = true;
+                                        break result;
+                                    }
+                                    else if suggestion == last_suggested_word {
+                                        found_last_suggested_word = true;
+                                    }
+                                }
+                            }
+                            if found_last_suggested_word && !set_last_suggested_word {
+                                free(last_suggested_word);
+                                last_suggested_word = copy_string(word_to_check);
+                            }
+                        }
+                    }
+
+                    if !found_last_suggested_word {
+                        if word_to_check  free(word_to_check);
+                        word_to_check = copy_string(clipboard_text);
+
+                        print("Asked to check word: %\n", word_to_check);
+
+                        if last_suggested_word  free(last_suggested_word);
+                        Spell_Checker.free_spell_check_results(spell_check_results);
+                        spell_check_results=, error := Spell_Checker.check_spelling(word_to_check);
+
+                        if error || !spell_check_results || !spell_check_results[0].replacement_suggestions {
+                            if error  print("Error: %\n", error);
+                            last_suggested_word = "";
+                        }
+                        else {
+                            last_suggested_word = copy_string(spell_check_results[0].replacement_suggestions[0]);
+                        }
+                    }
+
+                    if last_suggested_word {
+                        print("Trying to correct to: %\n", last_suggested_word);
+                        os_clipboard_set_text(last_suggested_word);
                         add_key(.CTRL, #char "V");
                         state = .SENDING_REPLACE_WORD_KEYCODES;
                     }
                     else {
-                        print("Nothing close.\n");
-                        os_clipboard_set_text(old_clipboard_value);
-                        add_key(VK_RIGHT);
+                        print("Aborting\n");
                         state = .DORMANT;
                     }
-                    fetched_clipboard_at = 0;
                 }
                 if clipboard_text  free(clipboard_text);
             }
@@ -263,22 +324,33 @@ main :: () {
             if !still_sending  state = .DORMANT;
         }
 
-        if did_something  color = .{1, 1, 1, 1};
-        else              color = lerp(color, base_color, 0.1);
-
-        Simp.clear_render_target(color.x, color.y, color.z, color.w);
-
-        //y := window_height;
-        //y -= (font_height + 2);
-        //Simp.prepare_text(font, text);
-        //Simp.draw_prepared_text(font, 0, y, .{1,1,1,1});
-
-        Simp.swap_buffers(window);
-
         reset_temporary_storage();
-        if state == .DORMANT && !should_quit
-            sleep_milliseconds(1);
     }
+
+    gui_shutdown();
+}
+
+quit :: () {
+    should_quit = true;
+}
+
+select_language :: (index: int) {
+    error := Spell_Checker.init(Spell_Checker.supported_languages[index]);
+    if error  print("Error: %\n", error);
+    refresh_language_menus();
+}
+
+refresh_language_menus :: () {
+    array_reset(*user_preferred_languages);
+    array_reset(*other_supported_languages);
+    for Spell_Checker.supported_languages {
+        is_checked := it == Spell_Checker.current_language;
+        menu := ifx it_index < Spell_Checker.user_preferred_language_count || is_checked
+                then *user_preferred_languages
+                else *other_supported_languages;
+        array_add(menu, menu_item(it, select_language, it_index, is_checked=is_checked));
+    }
+    array_add(*user_preferred_languages, sub_menu("More...", other_supported_languages));
 }
 
 show_error :: (msg: string) {
@@ -328,14 +400,14 @@ add_to_queue :: (to_emit: Key_To_Emit) {
 do_not_send_keys_until_after: float64;
 
 send_next_key :: () -> still_sending: bool {
-    if frame_time < do_not_send_keys_until_after  return true;
+    if frame.time < do_not_send_keys_until_after  return true;
 
     to_emit := key_emit_queue[key_emit_tail];
     key_emit_tail = (key_emit_tail + 1) % key_emit_queue.count;
 
     if #complete to_emit.type == {
         case .DELAY;
-            do_not_send_keys_until_after = frame_time + to_emit.delay;
+            do_not_send_keys_until_after = frame.time + to_emit.delay;
             return true;
 
         case .KEY;
@@ -489,141 +561,11 @@ GetKeyboardState :: (lpKeyState: *[256] u8) -> bool #foreign user32;
 SetWindowsHookExA :: (idHook: s32,  lpfn: HOOKPROC, hmod: HINSTANCE, dwThreadId: s32) -> HHOOK #foreign user32;
 CallNextHookEx :: (hhk: HHOOK, nCode: s32, wParam: WPARAM, lParam: LPARAM) -> LRESULT #foreign user32;
 SendInput :: (cInputs: u32, pInputs: *INPUT, cbSize: s32) -> u32 #foreign user32;
-CoUninitialize :: () -> void    #foreign Ole32;
-CoInitializeEx :: (pvReserved: *void, dwCoInit: DWORD) -> HRESULT #foreign Ole32;
-CoCreateInstance :: (rclsid: REFCLSID, pUnkOuter: *IUnknown, dwClsContext: CLSCTX, riid: REFIID, ppv: **void) -> HRESULT #foreign Ole32;
-CoTaskMemFree :: (ptr: *void) #foreign Ole32;
-
-using CLSCTX :: enum_flags u32 {
-    CLSCTX_INPROC_SERVER    :: 0x1;
-    CLSCTX_INPROC_HANDLER   :: 0x2;
-    CLSCTX_LOCAL_SERVER     :: 0x4;
-    CLSCTX_INPROC_SERVER16  :: 0x8;
-    CLSCTX_REMOTE_SERVER    :: 0x10;
-    CLSCTX_INPROC_HANDLER16 :: 0x20;
-    CLSCTX_RESERVED1        :: 0x40;
-    CLSCTX_RESERVED2        :: 0x80;
-    CLSCTX_RESERVED3        :: 0x100;
-    CLSCTX_RESERVED4        :: 0x200;
-    CLSCTX_NO_CODE_DOWNLOAD :: 0x400;
-    CLSCTX_RESERVED5        :: 0x800;
-    CLSCTX_NO_CUSTOM_MARSHAL    :: 0x1000;
-    CLSCTX_ENABLE_CODE_DOWNLOAD :: 0x2000;
-    CLSCTX_NO_FAILURE_LOG       :: 0x4000;
-    CLSCTX_DISABLE_AAA          :: 0x8000;
-    CLSCTX_ENABLE_AAA           :: 0x10000;
-    CLSCTX_FROM_DEFAULT_CONTEXT :: 0x20000;
-    CLSCTX_ACTIVATE_X86_SERVER  :: 0x40000;
-    CLSCTX_ACTIVATE_32_BIT_SERVER   :: CLSCTX_ACTIVATE_X86_SERVER;
-    CLSCTX_ACTIVATE_64_BIT_SERVER   :: 0x80000;
-    CLSCTX_ENABLE_CLOAKING          :: 0x100000;
-    CLSCTX_APPCONTAINER             :: 0x400000;
-    CLSCTX_ACTIVATE_AAA_AS_IU       :: 0x800000;
-    CLSCTX_RESERVED6                :: 0x1000000;
-    CLSCTX_ACTIVATE_ARM32_SERVER    :: 0x2000000;
-    CLSCTX_PS_DLL                   :: 0x80000000;
-
-    CLSCTX_INPROC   :: CLSCTX_INPROC_SERVER|CLSCTX_INPROC_HANDLER;
-    CLSCTX_ALL      :: CLSCTX_INPROC_SERVER|CLSCTX_INPROC_HANDLER|CLSCTX_LOCAL_SERVER|CLSCTX_REMOTE_SERVER;
-    CLSCTX_SERVER   :: CLSCTX_INPROC_SERVER|CLSCTX_LOCAL_SERVER|CLSCTX_REMOTE_SERVER;
-}
 
 user32 :: #system_library "user32";
 kernel32 :: #system_library "kernel32";
-Ole32 :: #system_library "Ole32";
 
-REFCLSID :: *IID;
 WH_KEYBOARD :: 2;
 WH_KEYBOARD_LL :: 13;
-COINIT_MULTITHREADED :: 0;
 
-word_blob: string;
-words: [] string;
-lower_words: [] string;
 
-read_dictionary :: () {
-    data := read_entire_file("words.txt");
-    builder: String_Builder;
-    lengths: [..] int;
-    for word: split(data, "\n") {
-        trimmed := trim(word);
-        append(*builder, trimmed);
-        to_lower_in_place(trimmed);
-        append(*builder, trimmed);
-        array_add(*lengths, trimmed.count);
-    }
-
-    word_blob = builder_to_string(*builder);
-    words = NewArray(lengths.count, string);
-    lower_words = NewArray(lengths.count, string);
-    offset := 0;
-    for length: lengths {
-        words[it_index].data = (cast(*u8)word_blob.data) + offset;
-        words[it_index].count = length;
-        offset += length;
-
-        lower_words[it_index].data = (cast(*u8)word_blob.data) + offset;
-        lower_words[it_index].count = length;
-        offset += length;
-    }
-    array_free(lengths);
-    free(data);
-}
-
-levenshtein_ascending: [128] s16;
-levenshtein_buffer: [128] s16;
-levenshtein_costs: [] s16;
-
-init_levenshtein :: () {
-    levenshtein_costs.data = levenshtein_buffer.data;
-    for 0 .. levenshtein_ascending.count - 1
-        levenshtein_ascending[it] = cast(s16) it;
-}
-
-levenshtein_distance :: (s1: string, s2: string) -> int {
-    if !s1  return s2.count;
-    if !s2  return s1.count;
-
-    levenshtein_costs.count = s2.count + 1;
-    memcpy(levenshtein_costs.data, levenshtein_ascending.data, levenshtein_costs.count * size_of(type_of(levenshtein_costs[0])));
-
-    for i: 0 .. cast(s16) s1.count - 1 {
-        c1 := s1[i];
-        levenshtein_costs[0] = i + 1;
-        corner := i;
-        for j: 0 .. s2.count - 1 {
-            c2 := s2[j];
-            upper := levenshtein_costs[j + 1];
-            if c1 == c2 {
-                levenshtein_costs[j + 1] = corner;
-            }
-            else {
-                t := ifx upper < corner then upper else corner;
-                levenshtein_costs[j + 1] = 1 + ifx levenshtein_costs[j] < t then levenshtein_costs[j] else t;
-            }
-            corner = upper;
-        }
-    }
-
-    return levenshtein_costs[s2.count];
-}
-
-get_nearest_word :: (s: string) -> string, score: int {
-    nearest_word: string;
-    nearest_score := 999999999;
-    lower_s := copy_temporary_string(s);
-    to_lower_in_place(lower_s);
-    caseless_match: string;
-    for word: words {
-        if lower_s == lower_words[it_index]
-            caseless_match = word;
-        score := levenshtein_distance(s, word);
-        if score < nearest_score {
-            nearest_score = score;
-            nearest_word = word;
-        }
-    }
-    if nearest_score == 0  return s, 0;
-    if caseless_match  return caseless_match, 0;
-    return nearest_word, nearest_score;
-}
