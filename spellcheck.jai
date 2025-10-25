@@ -175,9 +175,9 @@ main :: () {
     init_key_tracker(*left_control, VK_LCONTROL);
     init_key_tracker(*right_control, VK_RCONTROL);
 
-    window_width :: 512;
-    window_height :: 512;
-    application_panel := gui_create_application_window(APPLICATION_NAME_AND_VERSION, window_width, window_height, flags=.DEFAULT|.START_MINIMIZED|.HAS_NOTIFICATION_ICON|.HIDE_FROM_TASKBAR);
+    window_width :: 0;
+    window_height :: 0;
+    application_panel := gui_create_application_window(APPLICATION_NAME_AND_VERSION, window_width, window_height, flags=.START_MINIMIZED|.HAS_NOTIFICATION_ICON|.HIDE_FROM_TASKBAR);
 
     hook = SetWindowsHookExA(WH_KEYBOARD_LL, keyboard_hook, null, 0);
     if !hook  exit(1);
