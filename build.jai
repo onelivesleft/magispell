@@ -51,6 +51,7 @@ icon :: "icon.ico";
     compiler_begin_intercept(workspace);
 
     add_build_file(src_name, workspace);
+    add_build_string(sprint("BUILD_MODE : enum { DEBUG; RELEASE; } : %;\n", ifx optimized then ".RELEASE" else ".DEBUG"), workspace);
 
     while true {
         message := compiler_wait_for_message();
