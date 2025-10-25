@@ -180,7 +180,7 @@ free_spell_check_results :: (results: [] Spell_Check_Results) {
     array_free(results);
 }
 
-check_spelling :: (text: string) -> results: [] Spell_Check_Results, error: string {
+check_spelling :: (text: string, single_word_suggestions_only := false) -> results: [] Spell_Check_Results, error: string {
     text_wide := utf8_to_wide_new(text,, temp);
     errors: *IEnumSpellingError;
     hr := SpellChecker_Check(spell_checker, text_wide, *errors);
@@ -222,8 +222,17 @@ check_spelling :: (text: string) -> results: [] Spell_Check_Results, error: stri
             hr = suggestions.vtbl.Next(suggestions, 1, *suggestion, *sf);
             if hr == S_OK && sf == 1 {
                 s := wide_to_utf8_new(suggestion);
-                array_add(*result.replacement_suggestions, s);
                 CoTaskMemFree(suggestion);
+
+                contains :: (haystack: string, needle: u8) -> bool {
+                    for 0 .. haystack.count - 1
+                        if haystack[it] == needle
+                            return true;
+                    return false;
+                }
+
+                if !(single_word_suggestions_only && contains(s, #char " "))
+                    array_add(*result.replacement_suggestions, s);
             } else {
                 break;
             }

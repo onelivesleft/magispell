@@ -60,7 +60,7 @@ icon :: "icon.ico";
 
         if message.kind == .PHASE && no_output {
             phase := cast(*Message_Phase) message;
-            if phase.phase == .TYPECHECKED_ALL_WE_CAN {
+            if phase.phase == .TYPECHECKED_ALL_WE_CAN && phase.num_items_waiting_to_typecheck == 0 {
                 exit(0);
             }
         }

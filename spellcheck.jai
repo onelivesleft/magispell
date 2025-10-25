@@ -1,4 +1,7 @@
-APPLICATION_NAME :: "Magispell";
+#if BUILD_MODE == .RELEASE
+    APPLICATION_NAME :: "Magispell";
+else
+    APPLICATION_NAME :: "Magispell (DEBUG)";
 VERSION :: "v0.01";
 APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
 // BUILD_MODE : enum { DEBUG; RELEASE; }; is inserted by build.jai
@@ -11,7 +14,7 @@ APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
 //  [x] Section breaks
 //  [x] Checkmarks
 // [ ] Disallow spaces in answers (we are just correcting single words)
-// [ ] Cycle suggestions on subsequent presses
+// [x] Cycle suggestions on subsequent presses
 // [ ] User hotkeys for word selection
 //  [ ] Per-process specific?
 // [ ] User select word keystring
@@ -33,6 +36,9 @@ other_supported_languages: [..] Menu_Item;
 double_press_window :: 0.2;
 small_press_interval :: 1.0 / 1000;
 large_press_interval :: 3.0 / 1000;
+
+last_key_event_at: float64;
+sleep_after_idle_delay : float64 : 5.0;
 
 old_clipboard_value := "";
 clipboard_sentinel :: "!#@";
@@ -73,16 +79,19 @@ main :: () {
 
     while !should_quit {
         should_quit = gui_begin_frame();
-        frame.no_sleep = true;
 
         if key_events_tail != key_events_head {
+            last_key_event_at = frame.time;
             while key_events_tail != key_events_head {
                 key_events_tail += 1;
                 index := key_events_tail % key_events.count;
                 key_event := key_events[index];
+                echo(key_event);
                 for key_trackers  update_key_tracker(it, key_event);
             }
         }
+
+        frame.no_sleep =  frame.time < last_key_event_at + sleep_after_idle_delay;
 
         if gui_notification_icon_was_clicked() {
             gui_system_menu(
@@ -177,7 +186,14 @@ main :: () {
 
                         if last_suggested_word  free(last_suggested_word);
                         Spell_Checker.free_spell_check_results(spell_check_results);
-                        spell_check_results=, error := Spell_Checker.check_spelling(word_to_check);
+                        spell_check_results=, error := Spell_Checker.check_spelling(word_to_check, single_word_suggestions_only=true);
+
+                        #if BUILD_MODE == .DEBUG {
+                            echo("Suggestions:\n");
+                            for spell_check_results
+                                for suggestion: it.replacement_suggestions
+                                    echo("[%]\n", suggestion);
+                        }
 
                         if error || !spell_check_results || !spell_check_results[0].replacement_suggestions {
                             if error  show_error("Error: %\n", error);
@@ -469,14 +485,29 @@ refresh_language_menus :: () {
     array_add(*user_preferred_languages, sub_menu("More...", other_supported_languages));
 }
 
-echo :: (format_string: string, args: .. Any) {
+echo :: (args: .. Any) {
     #if BUILD_MODE == .DEBUG {
-        print(format_string, .. args);
+        if !args  return;
+        first_arg := (cast(*string)args[0].value_pointer).*;
+        format_string := ifx args.count >= 2 && args[0].type == cast(*Type_Info) string && contains(first_arg, #char "%") then first_arg;
+        _args := args;
+        _args.data += 1;
+        _args.count -= 1;
+        if format_string {
+            print(format_string, .. _args);
+        }
+        else {
+            builder: String_Builder;
+            append(*builder, "%");
+            for _args  append(*builder, " %");
+            append(*builder, "\n");
+            print(builder_to_string(*builder,, temp), args);
+        }
     }
 }
 
-show_error :: (format_string: string, args: .. Any) {
-    echo(format_string, .. args);
+show_error :: (args: .. Any) {
+    echo(.. args);
 }
 
 
