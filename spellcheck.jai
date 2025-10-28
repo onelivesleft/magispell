@@ -4,7 +4,8 @@ else
     APPLICATION_NAME :: "Magispell (DEBUG)";
 VERSION :: "v0.01";
 APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
-// BUILD_MODE : enum { DEBUG; RELEASE; }; is inserted by build.jai
+CONFIG_REGISTRY_SUBKEY :: "Software\\One Lives Left\\Magispell";
+// BUILD_MODE : enum { DEBUG; RELEASE; NO_OUTPUT; }; is inserted by build.jai
 
 // TODO
 // [x] Switch to windows spellchecker
@@ -13,7 +14,7 @@ APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
 //  [x] Move preferred languages to main menu, above the fold
 //  [x] Section breaks
 //  [x] Checkmarks
-// [ ] Disallow spaces in answers (we are just correcting single words)
+// [x] Disallow spaces in answers (we are just correcting single words)
 // [x] Cycle suggestions on subsequent presses
 // [ ] User hotkeys for word selection
 //  [ ] Per-process specific?
@@ -23,9 +24,11 @@ APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
 // [ ] Popup suggestions menu
 // [ ] Store config
 // [ ] Maybe allow user to check currently selected text?
-// [ ] SFX
-// [ ] Toasts (messages, errors)
+// [x] SFX
+// [x] Toasts (messages, errors)
 
+play_audio := true;
+current_language: string;
 
 spell_check_results: [] Spell_Checker.Spell_Check_Results;
 word_to_check: string;
@@ -59,15 +62,17 @@ should_quit := false;
 
 
 main :: () {
-    Spell_Checker.init();
+    read_config();
+
+    error := Spell_Checker.init(current_language);
     defer Spell_Checker.deinit();
     refresh_language_menus();
 
     init_key_tracker(*left_control, VK_LCONTROL);
     init_key_tracker(*right_control, VK_RCONTROL);
 
-    window_width :: 0;
-    window_height :: 0;
+    window_width :: 512;
+    window_height :: 512;
     application_panel := gui_create_application_window(APPLICATION_NAME_AND_VERSION, window_width, window_height, flags=.START_MINIMIZED|.HAS_NOTIFICATION_ICON|.HIDE_FROM_TASKBAR);
 
     hook = SetWindowsHookExA(WH_KEYBOARD_LL, global_keyboard_hook, null, 0);
@@ -76,28 +81,27 @@ main :: () {
     base_color :: Vector4.{.15, .08, .08, 1};
     color: Vector4;
 
-
     while !should_quit {
         should_quit = gui_begin_frame();
 
         if key_events_tail != key_events_head {
             last_key_event_at = frame.time;
             while key_events_tail != key_events_head {
-                key_events_tail += 1;
-                index := key_events_tail % key_events.count;
+                index := (key_events_tail + 1) % key_events.count;
                 key_event := key_events[index];
-                echo(key_event);
                 for key_trackers  update_key_tracker(it, key_event);
+                key_events_tail = index;
             }
         }
 
-        frame.no_sleep =  frame.time < last_key_event_at + sleep_after_idle_delay;
+        frame.no_sleep = frame.time < last_key_event_at + sleep_after_idle_delay;
 
         if gui_notification_icon_was_clicked() {
             gui_system_menu(
                 .[ menu_item(APPLICATION_NAME, is_default=true) ],
                 user_preferred_languages,
-                .[ menu_item("Exit", quit, icon=.SUB_MENU_CLOSE) ]
+                .[ menu_item("Sound", toggle_audio, is_checked=play_audio) ],
+                .[ menu_item("Exit", quit, icon=.SUB_MENU_CLOSE) ],
             );
         }
 
@@ -125,13 +129,13 @@ main :: () {
             old_clipboard_value = os_clipboard_get_text();
             os_clipboard_set_text(clipboard_sentinel);
 
-            add_key_to_emission_queue(.CTRL, #char "W");
-            add_key_to_emission_queue(.CTRL, #char "C");
+            add_to_key_emission_queue(.CTRL, #char "W");
+            add_to_key_emission_queue(.CTRL, #char "C");
             state = .SENDING_FETCH_WORD_KEYCODES;
         }
 
         if state == .SENDING_FETCH_WORD_KEYCODES {
-            still_sending := send_next_key_in_emission_queue();
+            still_sending := maybe_send_next_key_in_emission_queue();
             if !still_sending {
                 fetched_clipboard_at = frame.time;
                 state = .WAITING_FOR_WORD;
@@ -140,7 +144,7 @@ main :: () {
 
         if state == .WAITING_FOR_WORD {
             if frame.time - fetched_clipboard_at > clipboard_fetch_timeout {
-                show_error("Timed out waiting for clipboard to change.");
+                show_error("Timed out waiting for clipboard to change.\n");
                 state = .DORMANT;
             }
             else {
@@ -149,6 +153,7 @@ main :: () {
                     fetched_clipboard_at = 0;
 
                     found_last_suggested_word := false;
+                    replaced_with_original_word := false;
 
                     if spell_check_results && spell_check_results[0].replacement_suggestions && last_suggested_word && clipboard_text == last_suggested_word {
                         if last_suggested_word == word_to_check {
@@ -174,6 +179,7 @@ main :: () {
                             if found_last_suggested_word && !set_last_suggested_word {
                                 free(last_suggested_word);
                                 last_suggested_word = copy_string(word_to_check);
+                                replaced_with_original_word = true;
                             }
                         }
                     }
@@ -206,13 +212,16 @@ main :: () {
 
                     if last_suggested_word {
                         echo("Trying to correct to: %\n", last_suggested_word);
+                        play_sfx(ifx replaced_with_original_word then .REPLACED_WITH_ORIGINAL_WORD else .REPLACED_WITH_SUGGESTION);
                         os_clipboard_set_text(last_suggested_word);
-                        add_key_to_emission_queue(.CTRL, #char "V");
+                        add_to_key_emission_queue(.CTRL, #char "V");
                         state = .SENDING_REPLACE_WORD_KEYCODES;
                     }
                     else {
-                        echo("Aborting\n");
-                        state = .DORMANT;
+                        echo("No suggestions available\n");
+                        play_sfx(.REPLACED_WITH_ORIGINAL_WORD);
+                        add_to_key_emission_queue(VK_RIGHT);
+                        state = .SENDING_NO_REPLACE_KEYCODES;
                     }
                 }
                 if clipboard_text  free(clipboard_text);
@@ -221,7 +230,7 @@ main :: () {
 
         if state == .SENDING_REPLACE_WORD_KEYCODES
         || state == .SENDING_NO_REPLACE_KEYCODES {
-            still_sending := send_next_key_in_emission_queue();
+            still_sending := maybe_send_next_key_in_emission_queue();
             if !still_sending  state = .DORMANT;
         }
 
@@ -241,7 +250,15 @@ quit :: () {
 select_language :: (index: int) {
     error := Spell_Checker.init(Spell_Checker.supported_languages[index]);
     if error  show_error("Error: %\n", error);
+    current_language = Spell_Checker.supported_languages[index];
+    write_config();
     refresh_language_menus();
+}
+
+toggle_audio :: () {
+    play_audio = !play_audio;
+    if play_audio  play_sfx(.REPLACED_WITH_SUGGESTION);
+    write_config();
 }
 
 
@@ -261,12 +278,11 @@ global_keyboard_hook :: (code: s32, wParam: WPARAM, lParam: LPARAM) -> LRESULT #
     // This has to be as fast as possible; if we take too long windows will silently unhook us.
     // So, all we do is record the event in a queue, which is later digested in our main loop.
     if code >= 0 {
-        ptr := *key_events_head;
-        #asm { lock_inc.q [ptr]; }
-        index := key_events_head % key_events.count;
+        index := (key_events_head + 1 ) % key_events.count;
         key_event := *key_events[index];
         key_event.event_id = wParam;
         key_event.kb_struct = (cast(*KBDLLHOOKSTRUCT) lParam).*;
+        key_events_head = index;
     }
     return CallNextHookEx(hook, code, wParam, lParam);
 }
@@ -356,48 +372,42 @@ get_emission_delay :: (delay: float64) -> Emission_Key {
     return result;
 }
 
-add_to_emission_queue :: (to_emit: Emission_Key) {
+add_to_key_emission_queue :: (to_emit: Emission_Key) {
     emission_key_head = (emission_key_head + 1) % emission_key_queue.count;
     emission_key_queue[emission_key_head] = to_emit;
 }
 
-add_key_to_emission_queue :: inline (keycode: u16) {
-    add_key_to_emission_queue(0, keycode);
+add_to_key_emission_queue :: inline (keycode: u16) {
+    add_to_key_emission_queue(0, keycode);
 }
 
-add_key_to_emission_queue :: (flags: Key_Flags, keycode: u16) {
+add_to_key_emission_queue :: (flags: Key_Flags, keycode: u16) {
     has_modifier := flags != 0;
 
-    if flags & .CTRL   add_to_emission_queue(get_emission_key(VK_LCONTROL, .DOWN));
-    if flags & .SHIFT  add_to_emission_queue(get_emission_key(VK_LSHIFT, .DOWN));
-    if flags & .ALT    add_to_emission_queue(get_emission_key(VK_LALT, .DOWN));
+    if flags & .CTRL   add_to_key_emission_queue(get_emission_key(VK_LCONTROL, .DOWN));
+    if flags & .SHIFT  add_to_key_emission_queue(get_emission_key(VK_LSHIFT, .DOWN));
+    if flags & .ALT    add_to_key_emission_queue(get_emission_key(VK_LALT, .DOWN));
 
-    if has_modifier  add_small_delay_to_emission_queue();
+    if has_modifier  add_to_key_emission_queue(delay=small_press_interval);
 
-    add_to_emission_queue(get_emission_key(keycode, .DOWN));
-    add_small_delay_to_emission_queue();
-    add_to_emission_queue(get_emission_key(keycode, .UP));
+    add_to_key_emission_queue(get_emission_key(keycode, .DOWN));
+    add_to_key_emission_queue(delay=small_press_interval);
+    add_to_key_emission_queue(get_emission_key(keycode, .UP));
 
-    if has_modifier  add_small_delay_to_emission_queue();
+    if has_modifier  add_to_key_emission_queue(delay=small_press_interval);
 
-    if flags & .ALT    add_to_emission_queue(get_emission_key(VK_LALT, .UP));
-    if flags & .SHIFT  add_to_emission_queue(get_emission_key(VK_LSHIFT, .UP));
-    if flags & .CTRL   add_to_emission_queue(get_emission_key(VK_LCONTROL, .UP));
+    if flags & .ALT    add_to_key_emission_queue(get_emission_key(VK_LALT, .UP));
+    if flags & .SHIFT  add_to_key_emission_queue(get_emission_key(VK_LSHIFT, .UP));
+    if flags & .CTRL   add_to_key_emission_queue(get_emission_key(VK_LCONTROL, .UP));
 
-    add_large_delay_to_emission_queue();
+    add_to_key_emission_queue(delay=large_press_interval);
 }
 
-add_small_delay_to_emission_queue :: () {
-    delay := get_emission_delay(small_press_interval);
-    add_to_emission_queue(delay);
+add_to_key_emission_queue :: (delay: float64) {
+    add_to_key_emission_queue(get_emission_delay(small_press_interval));
 }
 
-add_large_delay_to_emission_queue :: () {
-    delay := get_emission_delay(large_press_interval);
-    add_to_emission_queue(delay);
-}
-
-send_next_key_in_emission_queue :: () -> still_sending: bool {
+maybe_send_next_key_in_emission_queue :: () -> still_sending: bool {
     if frame.time < do_not_send_keys_until_after  return true;
 
     to_emit := emission_key_queue[emission_key_tail];
@@ -470,6 +480,103 @@ generate_virtual_keystrokes :: (s: string) {
 }
 
 
+// Config
+
+with_registry_config :: (mode: enum { READ; WRITE; }) -> HKEY #expand {
+    hkey: HKEY;
+    error := RegCreateKeyExA(HKEY_CURRENT_USER, CONFIG_REGISTRY_SUBKEY, 0, null, REG_OPTION_NON_VOLATILE, cast(u32) ifx mode == .WRITE then KEY_SET_VALUE else KEY_QUERY_VALUE, 0, *hkey, null);
+    if error  `return;
+    `defer RegCloseKey(hkey);
+    return hkey;
+}
+
+write_config :: () {
+    hkey := with_registry_config(.WRITE);
+
+    error := write_config_option(hkey, "Current Language", current_language);
+    if error  show_error("Error: %\n", error);
+
+    error = write_config_option(hkey, "Sound", play_audio);
+    if error  show_error("Error: %\n", error);
+}
+
+write_config_option :: (hkey: HKEY, $$name: string, value: $T) -> LSTATUS {
+    result: LSTATUS;
+    #if T == string {
+        result = RegSetValueExA(hkey, null_terminated(name), 0, xx REG_SZ, null_terminated(value), cast(u32) (value.count + 1));
+    }
+    else #if T == bool {
+        dword := cast(u32) value;
+        result = RegSetValueExA(hkey, null_terminated(name), 0, xx REG_DWORD, cast(*u8) *dword, size_of(type_of(dword)));
+    }
+    else {
+        #assert false;
+    }
+
+    return result;
+}
+
+read_config :: () {
+    hkey := with_registry_config(.READ);
+    current_language = read_config_option(hkey, "Current Language", current_language);
+    play_audio =       read_config_option(hkey, "Sound", play_audio);
+}
+
+read_config_option :: (hkey: HKEY, name: string, default_value: $T) -> T {
+    value := default_value;
+    null_terminated_name := null_terminated(name);
+
+    #if T == string {
+        type : u32 = REG_SZ;
+        byte_count: u32;
+        error := RegQueryValueExA(hkey, null_terminated_name, null, *type, null, *byte_count);
+        if error  return value;
+
+        buffer := NewArray(byte_count, u8);
+        error = RegQueryValueExA(hkey,  null_terminated_name, null, *type, buffer.data, *byte_count);
+        if error  return value;
+
+        value.data = buffer.data;
+        value.count = buffer.count - 1; // Null terminated
+    }
+    else #if T == bool {
+        type : u32 = REG_DWORD;
+        dword: u32;
+        byte_count: u32 = size_of(type_of(dword));
+        error := RegQueryValueExA(hkey,  null_terminated_name, null, *type, cast(*u8) *dword, *byte_count);
+        if error  return value;
+
+        value = cast(bool) dword;
+    }
+    else {
+        #assert false;
+    }
+
+    return value;
+}
+
+
+// Audio
+
+sfx: enum {
+    NONE;
+    REPLACED_WITH_SUGGESTION;
+    REPLACED_WITH_ORIGINAL_WORD;
+}
+
+sound_raw_data : [#run enum_highest_value(type_of(sfx)) + 1] string : .[
+    "",                                     // .NONE
+    #run bake_file("smb_kick.wav"),       // .REPLACED_WITH_SUGGESTION
+    #run bake_file("smb_kick_start.wav"), // .REPLACED_WITH_ORIGINAL_WORD
+];
+
+play_sfx :: (id: type_of(sfx)) {
+    if play_audio
+        sndPlaySoundA(sound_raw_data[id].data, SND_MEMORY|SND_ASYNC|SND_NODEFAULT|SND_SYSTEM);
+}
+
+
+
 // Misc
 
 refresh_language_menus :: () {
@@ -485,29 +592,49 @@ refresh_language_menus :: () {
     array_add(*user_preferred_languages, sub_menu("More...", other_supported_languages));
 }
 
-echo :: (args: .. Any) {
+echo :: (format_string: string, args: .. Any) {
     #if BUILD_MODE == .DEBUG {
-        if !args  return;
-        first_arg := (cast(*string)args[0].value_pointer).*;
-        format_string := ifx args.count >= 2 && args[0].type == cast(*Type_Info) string && contains(first_arg, #char "%") then first_arg;
-        _args := args;
-        _args.data += 1;
-        _args.count -= 1;
-        if format_string {
-            print(format_string, .. _args);
-        }
-        else {
-            builder: String_Builder;
-            append(*builder, "%");
-            for _args  append(*builder, " %");
-            append(*builder, "\n");
-            print(builder_to_string(*builder,, temp), args);
-        }
+        print(format_string, .. args);
     }
 }
 
-show_error :: (args: .. Any) {
-    echo(.. args);
+show_message :: (format_string: string, args: .. Any) {
+    echo(format_string, args);
+    gui_notification_message(APPLICATION_NAME, tprint(format_string, args));
+}
+
+show_error :: (format_string: string, args: .. Any) {
+    echo(format_string, args);
+    gui_notification_message(APPLICATION_NAME, tprint(format_string, args), .ERROR);
+}
+
+null_terminated :: ($$s: string) -> *u8 {
+    #if is_constant(s) {
+        return s.data;
+    }
+    else {
+        result : string = ---;
+        result.count = s.count + 1;
+        result.data = alloc(result.count,, temp);
+
+        memcpy(result.data, s.data, s.count);
+        result[s.count] = #char "\0";
+
+        return result.data;
+    }
+}
+
+bake_file :: (filename: string) -> string #compile_time {
+    #if BUILD_MODE != .NO_OUTPUT {
+        file :: #import "File";
+        full_name := sprint("%media/%", #filepath, filename);
+        file_data, success := file.read_entire_file(full_name);
+        assert(success, "Failed to read %\n", full_name);
+        return file_data;
+    }
+    else {
+        return "";
+    }
 }
 
 
@@ -565,18 +692,32 @@ HARDWAREINPUT :: struct {
   wParamH: WORD;
 }
 
-HHOOK :: *void;
 FreeConsole :: () -> bool #foreign kernel32;
 GetKeyboardState :: (lpKeyState: *[256] u8) -> bool #foreign user32;
 SetWindowsHookExA :: (idHook: s32,  lpfn: HOOKPROC, hmod: HINSTANCE, dwThreadId: s32) -> HHOOK #foreign user32;
 CallNextHookEx :: (hhk: HHOOK, nCode: s32, wParam: WPARAM, lParam: LPARAM) -> LRESULT #foreign user32;
 SendInput :: (cInputs: u32, pInputs: *INPUT, cbSize: s32) -> u32 #foreign user32;
+sndPlaySoundA :: (lpszSound: *void, flags: u32) #foreign winmm;
+RegCreateKeyExA :: (hKey: HKEY, lpSubKey: LPCSTR, Reserved: DWORD, lpClass: LPSTR, dwOptions: DWORD, samDesired: REGSAM, lpSecurityAttributes: LPSECURITY_ATTRIBUTES, phkResult: *HKEY, lpdwDisposition: *s32) -> LSTATUS #foreign advapi32;
+RegSetValueExA :: (hkey: HKEY, lpSubKey: *u8, Reserved: DWORD, dwType: DWORD, lpData: *u8, cbData: DWORD) -> LSTATUS #foreign advapi32;
 
-user32 :: #system_library "user32";
+advapi32 :: #system_library "Advapi32";
 kernel32 :: #system_library "kernel32";
+user32 :: #system_library "user32";
+winmm :: #system_library "winmm";
 
+HHOOK :: *void;
 WH_KEYBOARD :: 2;
 WH_KEYBOARD_LL :: 13;
+
+LPSECURITY_ATTRIBUTES :: u64;
+REG_OPTION_NON_VOLATILE :: 0x00000000;
+KEY_SET_VALUE :: 0x0002;
+
+SND_ASYNC ::     0x000001;
+SND_NODEFAULT :: 0x000002;
+SND_MEMORY ::    0x000004;
+SND_SYSTEM ::    0x200000;
 
 
 // Imports
@@ -589,6 +730,8 @@ WH_KEYBOARD_LL :: 13;
 #import "Math";
 #import "Strings";
 #import "Windows";
+#import "Windows_Registry";
 #import "Windows_Utf8";
 
+Sound :: #import "Sound_Player";
 Spell_Checker :: #import "Windows_Spell_Checker";

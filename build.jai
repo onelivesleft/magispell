@@ -10,7 +10,7 @@ src_name :: "spellcheck.jai";
 debug_exe_name :: "spellcheck";
 release_exe_name :: "Magispell";
 path_to_exe := "./";
-icon :: "icon.ico";
+icon :: "media/icon.ico";
 
 #run {
     exe_name := debug_exe_name;
@@ -50,19 +50,18 @@ icon :: "icon.ico";
 
     compiler_begin_intercept(workspace);
 
+    add_build_string(sprint("BUILD_MODE : enum { DEBUG; RELEASE; NO_OUTPUT; } : %;\n", ifx optimized then ".RELEASE" else ifx no_output then ".NO_OUTPUT" else ".DEBUG"), workspace);
     add_build_file(src_name, workspace);
-    add_build_string(sprint("BUILD_MODE : enum { DEBUG; RELEASE; } : %;\n", ifx optimized then ".RELEASE" else ".DEBUG"), workspace);
 
     while true {
         message := compiler_wait_for_message();
         if !message || message.workspace != workspace continue;
         if message.kind == .COMPLETE break;
 
-        if message.kind == .PHASE && no_output {
+        if no_output && message.kind == .PHASE {
             phase := cast(*Message_Phase) message;
-            if phase.phase == .TYPECHECKED_ALL_WE_CAN && phase.num_items_waiting_to_typecheck == 0 {
+            if phase.phase == .TYPECHECKED_ALL_WE_CAN && phase.num_items_waiting_to_typecheck == 0
                 exit(0);
-            }
         }
     }
 

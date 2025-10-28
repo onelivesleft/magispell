@@ -92,7 +92,7 @@ init_factory :: () -> error: string {
 
 #scope_export
 
-init :: (language := "") -> error: string {
+init :: (preferred_language := "") -> error: string {
     if !spell_checker_factory {
         hr := CoInitializeEx(null, COINIT_MULTITHREADED);
         if hr != S_OK
@@ -139,13 +139,27 @@ init :: (language := "") -> error: string {
             return "SpellChecker reports it has no supported languages";
     }
 
-    current_language = ifx language else supported_languages[0];
-
     supported := false;
-    language_wide := utf8_to_wide_new(current_language,, temp);
-    hr = SpellCheckerFactory_IsSupported(spell_checker_factory, language_wide, *supported);
-    if hr != S_OK || !supported
-        return tprint("% not supported: 0x%\n", language, cast(*void)hr);
+    language_wide: *u16;
+    if preferred_language {
+        language_wide = utf8_to_wide_new(preferred_language,, temp);
+        hr = SpellCheckerFactory_IsSupported(spell_checker_factory, language_wide, *supported);
+        if hr != S_OK  supported = false;
+    }
+
+    if supported {
+        current_language = preferred_language;
+    }
+    else {
+        language_wide = utf8_to_wide_new(supported_languages[0],, temp);
+        hr = SpellCheckerFactory_IsSupported(spell_checker_factory, language_wide, *supported);
+        if hr != S_OK  supported = false;
+
+        if supported
+            current_language = supported_languages[0];
+        else
+            return "Could not find a supported language\n";
+    }
 
     hr = SpellCheckerFactory_CreateSpellChecker(spell_checker_factory, language_wide, *spell_checker);
     if hr != S_OK
