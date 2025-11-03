@@ -2,7 +2,7 @@
     APPLICATION_NAME :: "Magispell";
 else
     APPLICATION_NAME :: "Magispell (DEBUG)";
-VERSION :: "v0.01";
+VERSION :: "v1.00";
 APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
 CONFIG_REGISTRY_SUBKEY :: "Software\\One Lives Left\\Magispell";
 // BUILD_MODE : enum { DEBUG; RELEASE; NO_OUTPUT; }; is inserted by build.jai
@@ -22,8 +22,8 @@ USE_DEBUG_ALLOCATOR : enum { NONE; UNMAPPING; OVERWRITING; } : .NONE;
 // [ ] User select word keystring
 //  [ ] Initially: left/right/both ctrl + double/triple press?
 //  [ ] Subsequently: choose hotkey
-// [ ] Popup suggestions menu
-// [ ] Store config
+// [x] Popup suggestions menu
+// [x] Store config
 // [ ] Maybe allow user to check currently selected text?
 // [x] SFX
 // [x] Toasts (messages, errors)
@@ -123,7 +123,7 @@ main :: () {
 
         if gui_notification_icon_was_clicked() {
             gui_system_menu(
-                .[ menu_item(APPLICATION_NAME, .IS_DEFAULT) ],
+                .[ menu_item(APPLICATION_NAME, .IS_DEFAULT), menu_item(VERSION),  ],
                 user_preferred_languages,
                 .[ menu_item("Sound", toggle_audio, ifx play_audio then .IS_CHECKED),
                    sub_menu("Options...", .[
@@ -197,9 +197,8 @@ main :: () {
             clipboard_text := os_clipboard_get_text();
 
             if clipboard_text {
-                if !contains(clipboard_text, " ") {
-                    if received_word  free(received_word);
-                    received_word = copy_string(clipboard_text);
+                if !contains(clipboard_text, #char " ") {
+                    set_string_with_copy(*received_word, clipboard_text);
                     state = .RECEIVED_WORD;
                 }
                 else {
@@ -220,9 +219,8 @@ main :: () {
             replaced_with_original_word := false;
 
             if spell_check_results && spell_check_results[0].replacement_suggestions && last_suggested_word && received_word == last_suggested_word {
-                if last_suggested_word == word_to_check {
-                    free(last_suggested_word);
-                    last_suggested_word = copy_string(spell_check_results[0].replacement_suggestions[0]);
+                if received_word == word_to_check {
+                    set_string_with_copy(*last_suggested_word, spell_check_results[0].replacement_suggestions[0]);
                     found_received_word = true;
                 }
                 else {
@@ -230,8 +228,7 @@ main :: () {
                     for result: spell_check_results {
                         for suggestion: result.replacement_suggestions {
                             if found_received_word {
-                                free(last_suggested_word);
-                                last_suggested_word = copy_string(suggestion);
+                                set_string_with_copy(*last_suggested_word, suggestion);
                                 set_last_suggested_word = true;
                                 break result;
                             }
@@ -241,43 +238,38 @@ main :: () {
                         }
                     }
                     if found_received_word && !set_last_suggested_word {
-                        free(last_suggested_word);
-                        last_suggested_word = copy_string(word_to_check);
+                        set_string_with_copy(*last_suggested_word, word_to_check);
                         replaced_with_original_word = true;
                     }
                 }
             }
 
             if !found_received_word {
-                if word_to_check  free(word_to_check);
-                word_to_check = copy_string(received_word);
+                set_string_with_copy(*word_to_check, received_word);
 
                 echo("Asked to check word: %\n", word_to_check);
 
                 Spell_Checker.free_spell_check_results(spell_check_results);
                 spell_check_results=, error := Spell_Checker.check_spelling(word_to_check, single_word_suggestions_only=true);
 
-                #if BUILD_MODE == .DEBUG {
-                    echo("Suggestions:\n");
-                    for spell_check_results
-                        for suggestion: it.replacement_suggestions
-                            echo("[%]\n", suggestion);
-                }
+                echo("Suggestions:\n");
+                for spell_check_results
+                    for suggestion: it.replacement_suggestions
+                        echo(" [%] <%>\n", suggestion, cast(*void)suggestion.data);
 
                 if error || !spell_check_results || !spell_check_results[0].replacement_suggestions {
                     if error  show_error("Error: %\n", error);
-                    if last_suggested_word  free(last_suggested_word);
-                    last_suggested_word = "";
+                    set_string_directly(*last_suggested_word, "");
                 }
                 else {
-                    if last_suggested_word  free(last_suggested_word);
-                    last_suggested_word = copy_string(spell_check_results[0].replacement_suggestions[0]);
+                    set_string_with_copy(*last_suggested_word, spell_check_results[0].replacement_suggestions[0]);
                 }
             }
 
             if last_suggested_word {
                 if #complete suggestion_mode == {
                     case .CYCLE;
+                        echo("--- Cycling ---\n");
                         echo("Trying to correct to: %\n", last_suggested_word);
                         play_sfx(ifx replaced_with_original_word then .REPLACED_WITH_ORIGINAL_WORD else .REPLACED_WITH_SUGGESTION);
                         os_clipboard_set_text(last_suggested_word);
@@ -285,6 +277,7 @@ main :: () {
                         state = .SENDING_REPLACE_WORD_KEYCODES;
 
                     case .MENU;
+                        echo("--- Showing popup menu ---\n");
                         refresh_replacement_suggestions_menu();
                         gui_system_menu(replacement_suggestions_menu);
                         assert(state == .SENDING_REPLACE_WORD_KEYCODES || state == .SENDING_NO_REPLACE_KEYCODES);
@@ -320,7 +313,7 @@ quit :: () {
 select_language :: (index: int) {
     error := Spell_Checker.init(Spell_Checker.supported_languages[index]);
     if error  show_error("Error: %\n", error);
-    current_language = Spell_Checker.supported_languages[index];
+    set_string_directly(*current_language, Spell_Checker.supported_languages[index]);
     write_config();
     refresh_language_menus();
 }
@@ -334,8 +327,7 @@ select_replacement_suggestion :: (index: int) {
 
     replace_with_original_word := (index == cast(int) Replacement_Suggestions_Menu_Id.USE_WORD_TO_CHECK);
     if replace_with_original_word {
-        if last_suggested_word  free(last_suggested_word);
-        last_suggested_word = copy_string(word_to_check);
+        set_string_with_copy(*last_suggested_word, word_to_check);
         play_sfx(.REPLACED_WITH_ORIGINAL_WORD);
     }
     else {
@@ -343,8 +335,7 @@ select_replacement_suggestion :: (index: int) {
         for result: spell_check_results {
             for suggestion: result.replacement_suggestions {
                 if suggestion_index == index {
-                    if last_suggested_word  free(last_suggested_word);
-                    last_suggested_word = suggestion;
+                    set_string_with_copy(*last_suggested_word, suggestion);
                     break result;
                 }
                 suggestion_index += 1;
@@ -681,8 +672,8 @@ write_config_option :: (hkey: HKEY, $$name: string, value: $T) -> LSTATUS {
 
 read_config :: () {
     hkey := with_registry_config(.READ);
-    current_language = read_config_option(hkey, CONFIG_CURRENT_LANGUAGE, current_language);
-    play_audio =       read_config_option(hkey, CONFIG_SOUND, play_audio);
+    set_string_directly(*current_language, read_config_option(hkey, CONFIG_CURRENT_LANGUAGE, current_language));
+    play_audio = read_config_option(hkey, CONFIG_SOUND, play_audio);
 
     large_press_interval_ms = read_config_option(hkey, CONFIG_KEY_SEND_INTERVAL, large_press_interval_ms);
     large_press_interval = cast(float64) large_press_interval_ms / 1000.0;
@@ -748,6 +739,15 @@ play_sfx :: (id: type_of(sfx)) {
 
 // Misc
 
+set_string_with_copy :: (s: *string, value: string) {
+    if s && s.*  free(s.*);
+    s.* = copy_string(value);
+}
+
+set_string_directly :: (s: *string, value: string) {
+    s.* = value;
+}
+
 refresh_language_menus :: () {
     array_reset(*user_preferred_languages);
     array_reset(*other_supported_languages);
@@ -756,7 +756,7 @@ refresh_language_menus :: () {
         menu := ifx it_index < Spell_Checker.user_preferred_language_count || is_checked
                 then *user_preferred_languages
                 else *other_supported_languages;
-        array_add(menu, menu_item(it, select_language, it_index, .IS_CHECKED));
+        array_add(menu, menu_item(it, select_language, it_index, ifx is_checked then .IS_CHECKED));
     }
     array_add(*user_preferred_languages, sub_menu("More...", other_supported_languages));
 }
@@ -768,7 +768,7 @@ Replacement_Suggestions_Menu_Id :: enum {
 
 refresh_replacement_suggestions_menu :: () {
     array_reset(*replacement_suggestions_menu);
-    array_add(*replacement_suggestions_menu, menu_item(word_to_check, select_replacement_suggestion, cast(int) Replacement_Suggestions_Menu_Id.USE_WORD_TO_CHECK));
+    array_add(*replacement_suggestions_menu, menu_item(word_to_check, select_replacement_suggestion, cast(int) Replacement_Suggestions_Menu_Id.USE_WORD_TO_CHECK, .IS_DEFAULT));
     array_add(*replacement_suggestions_menu, menu_separator());
     index := 0;
     for result: spell_check_results {
@@ -811,6 +811,13 @@ null_terminated :: ($$s: string) -> *u8 {
 
         return result.data;
     }
+}
+
+contains :: (haystack: string, needle: u8) -> bool {
+    for 0 .. haystack.count - 1
+        if haystack[it] == needle
+            return true;
+    return false;
 }
 
 bake_file :: (filename: string) -> string #compile_time {
@@ -917,7 +924,6 @@ SND_SYSTEM ::    0x200000;
 #import "Clipboard";
 #import "File";
 #import "Math";
-#import "Strings";
 #import "Windows";
 #import "Windows_Registry";
 #import "Windows_Utf8";

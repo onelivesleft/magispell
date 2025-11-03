@@ -187,32 +187,33 @@ Spell_Check_Results :: struct {
 
 free_spell_check_results :: (results: [] Spell_Check_Results) {
     if !results  return;
-    for results {
-        for it.replacement_suggestions  free(it);
-        array_free(it.replacement_suggestions);
+    for result: results {
+        for suggestion: result.replacement_suggestions
+            free(suggestion);
+        array_free(result.replacement_suggestions);
     }
     array_free(results);
 }
 
 check_spelling :: (text: string, single_word_suggestions_only := false) -> results: [] Spell_Check_Results, error: string {
     text_wide := utf8_to_wide_new(text,, temp);
-    errors: *IEnumSpellingError;
-    hr := SpellChecker_Check(spell_checker, text_wide, *errors);
+    spelling_errors: *IEnumSpellingError;
+    hr := SpellChecker_Check(spell_checker, text_wide, *spelling_errors);
     if hr != S_OK
         return .[], tprint("Check failed: 0x%\n", cast(*void)hr);
-    if errors == null
-        return .[], "SpellChecker_Check returned null errors, but this should not happen!\n";
+    if spelling_errors == null
+        return .[], "SpellChecker_Check returned null spelling_errors, but this should not happen!\n";
 
-    defer errors.vtbl.Release(xx errors);
+    defer spelling_errors.vtbl.Release(xx spelling_errors);
 
     results: [..] Spell_Check_Results;
 
     while true {
-        error: *ISpellingError;
-        hr = errors.vtbl.Next(errors, *error);
+        spelling_error: *ISpellingError;
+        hr = spelling_errors.vtbl.Next(spelling_errors, *spelling_error);
         if hr != S_OK  break;
 
-        defer error.vtbl.Release(xx error);
+        defer spelling_error.vtbl.Release(xx spelling_error);
 
         suggestions: *IEnumString;
         SpellChecker_Suggest(spell_checker, text_wide, *suggestions);
@@ -223,12 +224,12 @@ check_spelling :: (text: string, single_word_suggestions_only := false) -> resul
 
         result := array_add(*results);
         start_index: s32;
-        SpellingError_get_StartIndex(error, cast(*u32) *start_index);
+        SpellingError_get_StartIndex(spelling_error, cast(*u32) *start_index);
         result.start_index = wide_to_utf8_converted_length(text_wide, cast(s32) start_index);
-        length : s32;
-        SpellingError_get_Length(error, cast(*u32) *length);
+        length: s32;
+        SpellingError_get_Length(spelling_error, cast(*u32) *length);
         result.length = wide_to_utf8_converted_length(text_wide, cast(s32) length);
-        SpellingError_get_CorrectiveAction(error, cast(*s32) *result.recommended_action);
+        SpellingError_get_CorrectiveAction(spelling_error, cast(*s32) *result.recommended_action);
 
         while true {
             suggestion: *WCHAR;
