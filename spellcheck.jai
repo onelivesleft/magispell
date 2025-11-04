@@ -2,7 +2,7 @@
     APPLICATION_NAME :: "Magispell";
 else
     APPLICATION_NAME :: "Magispell (DEBUG)";
-VERSION :: "v1.00";
+VERSION :: "v1.01";
 APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
 CONFIG_REGISTRY_SUBKEY :: "Software\\One Lives Left\\Magispell";
 // BUILD_MODE : enum { DEBUG; RELEASE; NO_OUTPUT; }; is inserted by build.jai
@@ -22,6 +22,7 @@ USE_DEBUG_ALLOCATOR : enum { NONE; UNMAPPING; OVERWRITING; } : .NONE;
 // [ ] User select word keystring
 //  [ ] Initially: left/right/both ctrl + double/triple press?
 //  [ ] Subsequently: choose hotkey
+// [x] Choose select word method
 // [x] Popup suggestions menu
 // [x] Store config
 // [ ] Maybe allow user to check currently selected text?
@@ -30,6 +31,7 @@ USE_DEBUG_ALLOCATOR : enum { NONE; UNMAPPING; OVERWRITING; } : .NONE;
 
 play_audio := true;
 current_language: string;
+select_word_action : enum { CTRL_LEFT_SHIFT_RIGHT; CTRL_W; CTRL_D; } = .CTRL_LEFT_SHIFT_RIGHT;
 
 spell_check_results: [] Spell_Checker.Spell_Check_Results;
 word_to_check: string;
@@ -127,11 +129,16 @@ main :: () {
                 user_preferred_languages,
                 .[ menu_item("Sound", toggle_audio, ifx play_audio then .IS_CHECKED),
                    sub_menu("Options...", .[
-                        menu_item("Key Send Interval", .IS_DISABLED),
-                        menu_item("20ms",  set_key_send_interval, 0, ifx (large_press_interval_ms==large_press_intervals[0]) then .IS_CHECKED),
-                        menu_item("40ms",  set_key_send_interval, 1, ifx (large_press_interval_ms==large_press_intervals[1]) then .IS_CHECKED),
-                        menu_item("80ms",  set_key_send_interval, 2, ifx (large_press_interval_ms==large_press_intervals[2]) then .IS_CHECKED),
-                        menu_item("160ms", set_key_send_interval, 3, ifx (large_press_interval_ms==large_press_intervals[3]) then .IS_CHECKED),
+                        //menu_item("Key Send Interval", .IS_DISABLED),
+                        //menu_item("20ms",  set_key_send_interval, 0, ifx (large_press_interval_ms==large_press_intervals[0]) then .IS_CHECKED),
+                        //menu_item("40ms",  set_key_send_interval, 1, ifx (large_press_interval_ms==large_press_intervals[1]) then .IS_CHECKED),
+                        //menu_item("80ms",  set_key_send_interval, 2, ifx (large_press_interval_ms==large_press_intervals[2]) then .IS_CHECKED),
+                        //menu_item("160ms", set_key_send_interval, 3, ifx (large_press_interval_ms==large_press_intervals[3]) then .IS_CHECKED),
+                        //menu_separator(),
+                        menu_item("Select Word Keystrokes", .IS_DISABLED),
+                        menu_item("ctrl+left -> ctrl+shift+right", set_select_word_action, 0, ifx (select_word_action==.CTRL_LEFT_SHIFT_RIGHT) then .IS_CHECKED),
+                        menu_item("ctrl+w", set_select_word_action, 1, ifx (select_word_action==.CTRL_W) then .IS_CHECKED),
+                        menu_item("ctrl+d", set_select_word_action, 2, ifx (select_word_action==.CTRL_D) then .IS_CHECKED),
                         menu_separator(),
                         menu_item("Double Press Interval", .IS_DISABLED),
                         menu_item("100ms", set_consecutive_press_interval, 0, ifx (consecutive_press_interval_ms==consecutive_press_intervals[0]) then .IS_CHECKED),
@@ -320,7 +327,7 @@ select_language :: (index: int) {
 
 select_replacement_suggestion :: (index: int) {
     if index == cast(int) Replacement_Suggestions_Menu_Id.CANCEL {
-        add_to_key_emission_queue(.UNSELECT_WORD);
+        emit_key_sequence(.UNSELECT_WORD);
         state = .SENDING_NO_REPLACE_KEYCODES;
         return;
     }
@@ -346,7 +353,7 @@ select_replacement_suggestion :: (index: int) {
 
     echo("Trying to correct to: %\n", last_suggested_word);
     os_clipboard_set_text(last_suggested_word);
-    add_to_key_emission_queue(.CLIPBOARD_PASTE);
+    emit_key_sequence(.CLIPBOARD_PASTE);
     state = .SENDING_REPLACE_WORD_KEYCODES;
 }
 
@@ -360,6 +367,11 @@ set_key_send_interval :: (index: int) {
     large_press_interval_ms = large_press_intervals[index];
     large_press_interval = cast(float64) large_press_interval_ms / 1000.0;
     small_press_interval = large_press_interval / 2;
+    write_config();
+}
+
+set_select_word_action :: (index: int) {
+    select_word_action = xx index;
     write_config();
 }
 
@@ -450,6 +462,9 @@ key_tracker_pressed :: (key_tracker: Key_Tracker, consecutive_presses := 0) -> b
 
 
 // Key emission: sending virtual keypress events
+// @Note: Not currently using the emission queue, we're just using generate_virtual_keystrokes so as to batch the keypresses
+//        Maybe batching them will be a problem or we'll want to revisit when we allow the user to specify keystrokes,
+//        so keeping it around for now.
 
 do_not_send_keys_until_after: float64;
 inputs_buffer: [..] INPUT;
@@ -458,13 +473,16 @@ emission_key_write_index: int;
 emission_key_read_index: int;
 
 Emission_Key :: struct {
-    type : enum { KEY; DELAY; }
+    type : enum { KEY; DELAY; CLIENT_ACTION; }
 
     virtual_code: u16;
     direction: enum { UP; DOWN; }
 
     #place virtual_code;
     delay: float64;
+
+    #place virtual_code;
+    client_action: Client_Action;
 }
 
 Key_Flags :: enum_flags u8 {
@@ -495,6 +513,13 @@ get_emission_delay :: (delay: float64) -> Emission_Key {
     return result;
 }
 
+get_emission_client_action :: (client_action: Client_Action) -> Emission_Key {
+    result: Emission_Key;
+    result.type = .CLIENT_ACTION;
+    result.client_action = client_action;
+    return result;
+}
+
 add_to_key_emission_queue :: (to_emit: Emission_Key) {
     emission_key_queue[emission_key_write_index] = to_emit;
     emission_key_write_index = (emission_key_write_index + 1) % emission_key_queue.count;
@@ -514,7 +539,7 @@ add_to_key_emission_queue :: (flags: Key_Flags, keycode: u16) {
     if flags & .SHIFT  add_to_key_emission_queue(get_emission_key(VK_LSHIFT, .DOWN));
     if flags & .ALT    add_to_key_emission_queue(get_emission_key(VK_LALT, .DOWN));
 
-    if has_modifier  add_to_key_emission_queue(delay=small_press_interval);
+    if has_modifier  add_to_key_emission_queue(delay=ifx flags & .SHIFT then large_press_interval else small_press_interval);
 
     add_to_key_emission_queue(get_emission_key(keycode, .DOWN));
     add_to_key_emission_queue(delay=small_press_interval);
@@ -531,12 +556,27 @@ add_to_key_emission_queue :: (delay: float64) {
     add_to_key_emission_queue(get_emission_delay(delay));
 }
 
-add_to_key_emission_queue :: (action: Client_Action) {
+add_to_key_emission_queue :: (client_action: Client_Action) {
+    add_to_key_emission_queue(get_emission_client_action(client_action));
+}
+
+emit_key_sequence :: (action: Client_Action) {
     if #complete action == {
-        case .SELECT_WORD;      add_to_key_emission_queue(.CTRL, #char "W");
-        case .CLIPBOARD_COPY;   add_to_key_emission_queue(.CTRL, #char "C");
-        case .CLIPBOARD_PASTE;  add_to_key_emission_queue(.CTRL, #char "V");
-        case .UNSELECT_WORD;    add_to_key_emission_queue(VK_RIGHT);
+        case .CLIPBOARD_COPY;   generate_virtual_keystrokes("cCc");
+        case .CLIPBOARD_PASTE;  generate_virtual_keystrokes("cVc");
+        case .UNSELECT_WORD;    generate_virtual_keystrokes("r");
+
+        case .SELECT_WORD;
+            if #complete select_word_action == {
+                case .CTRL_W;
+                generate_virtual_keystrokes("cWc");
+
+                case .CTRL_D;
+                generate_virtual_keystrokes("cDc");
+
+                case .CTRL_LEFT_SHIFT_RIGHT;
+                generate_virtual_keystrokes("clsrsc");
+            }
     }
 }
 
@@ -550,9 +590,9 @@ emission_queue_ends_with_key_press :: () -> bool {
 }
 
 maybe_send_next_key_in_emission_queue :: () -> still_sending: bool {
+    if emission_key_write_index == emission_key_read_index  return false;
     if frame.time < do_not_send_keys_until_after  return true;
 
-    assert(emission_key_write_index != emission_key_read_index);
     to_emit := emission_key_queue[emission_key_read_index];
     emission_key_read_index = (emission_key_read_index + 1) % emission_key_queue.count;
 
@@ -563,8 +603,12 @@ maybe_send_next_key_in_emission_queue :: () -> still_sending: bool {
 
         case .KEY;
             generate_virtual_keystroke(to_emit.virtual_code, to_emit.direction);
-            return emission_key_write_index != emission_key_read_index;
+
+        case .CLIENT_ACTION;
+            emit_key_sequence(to_emit.client_action);
     }
+
+    return emission_key_write_index != emission_key_read_index;
 }
 
 generate_virtual_keystroke :: (virtual_code: u16, direction: type_of(Emission_Key.direction)) {
@@ -578,48 +622,72 @@ generate_virtual_keystroke :: (virtual_code: u16, direction: type_of(Emission_Ke
     SendInput(cast(u32) inputs_buffer.count, inputs_buffer.data, size_of(INPUT));
 }
 
-generate_virtual_keystrokes :: (s: string) {
+generate_virtual_keystrokes :: (raw_key_sequence: string) {
+    // raw_key_sequence is a series of characters:
+    //  upper case = that specific letter key
+    //  c = control (toggles)
+    //  s = shift (toggles)
+    //  l = left arrow
+    //  r = right arrow
+    // c and s must be called an even number of times (it sends key down on first, and key up on the next)
+
     array_reset(*inputs_buffer);
     ctrl_held := false;
     shift_held := false;
-    for 0 .. s.count - 1 {
-        char := s[it];
+    for 0 .. raw_key_sequence.count - 1 {
+        char := raw_key_sequence[it];
 
         if char == #char "c" {
             input := array_add(*inputs_buffer);
-            input.* = .{};
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = VK_LCONTROL;
-            if ctrl_held  input.ki.dwFlags = KEYEVENTF_KEYUP;
+            input.* = .{
+                type = INPUT_KEYBOARD,
+                ki.wVk = VK_LCONTROL,
+            };
+            if ctrl_held  input.ki.dwFlags |= KEYEVENTF_KEYUP;
             ctrl_held = !ctrl_held;
         }
         else if char == #char "s" {
             input := array_add(*inputs_buffer);
-            input.* = .{};
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = VK_LSHIFT;
-            if shift_held  input.ki.dwFlags = KEYEVENTF_KEYUP;
+            input.* = .{
+                type = INPUT_KEYBOARD,
+                ki.wVk = VK_LSHIFT,
+            };
+            if shift_held  input.ki.dwFlags |= KEYEVENTF_KEYUP;
             shift_held = !shift_held;
         }
         else {
+            wVk : WORD = char;
+            dwFlags : WORD = 0;
+            if char == #char "l" {
+                wVk = VK_LEFT;
+                dwFlags = KEYEVENTF_EXTENDEDKEY;
+            }
+            else if char == #char "r" {
+                wVk = VK_RIGHT;
+                dwFlags = KEYEVENTF_EXTENDEDKEY;
+            }
+
             // Down
-            input := array_add(*inputs_buffer);
-            input.* = .{};
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = xx char;
+            array_add(*inputs_buffer, .{
+                type = INPUT_KEYBOARD,
+                ki.wVk = wVk,
+                ki.dwFlags = dwFlags,
+            });
 
             // Up
-            input = array_add(*inputs_buffer);
-            input.* = .{};
-            input.type = INPUT_KEYBOARD;
-            input.ki.wVk = xx char;
-            input.ki.dwFlags = KEYEVENTF_KEYUP;
+            array_add(*inputs_buffer, .{
+                type = INPUT_KEYBOARD,
+                ki.wVk = wVk,
+                ki.dwFlags = dwFlags|KEYEVENTF_KEYUP,
+            });
         }
     }
     assert(!ctrl_held && !shift_held);
 
-    if inputs_buffer.count
-        foo := SendInput(xx inputs_buffer.count, inputs_buffer.data, size_of(INPUT));
+    if inputs_buffer.count {
+        keystrokes := SendInput(xx inputs_buffer.count, inputs_buffer.data, size_of(INPUT));
+        print("Sent % key events\n", keystrokes);
+    }
 }
 
 
@@ -628,6 +696,7 @@ generate_virtual_keystrokes :: (s: string) {
 CONFIG_CURRENT_LANGUAGE ::  "Current Language";
 CONFIG_SOUND ::             "Sound";
 CONFIG_KEY_SEND_INTERVAL :: "Key Send Interval (ms)";
+CONFIG_SELECT_WORD_ACTION :: "Select Word Keystrokes ID";
 CONFIG_CONSECUTIVE_PRESS_INTERVAL :: "Double Press Interval (ms)";
 
 with_registry_config :: (mode: enum { READ; WRITE; }) -> HKEY #expand {
@@ -648,6 +717,9 @@ write_config :: () {
     if error  show_error("Error: %\n", error);
 
     error = write_config_option(hkey, CONFIG_KEY_SEND_INTERVAL, large_press_interval_ms);
+    if error  show_error("Error: %\n", error);
+
+    error = write_config_option(hkey, CONFIG_SELECT_WORD_ACTION, cast(s32) select_word_action);
     if error  show_error("Error: %\n", error);
 
     error = write_config_option(hkey, CONFIG_CONSECUTIVE_PRESS_INTERVAL, consecutive_press_interval_ms);
@@ -678,6 +750,16 @@ read_config :: () {
     large_press_interval_ms = read_config_option(hkey, CONFIG_KEY_SEND_INTERVAL, large_press_interval_ms);
     large_press_interval = cast(float64) large_press_interval_ms / 1000.0;
     small_press_interval = large_press_interval / 2;
+
+    select_word_action = xx read_config_option(hkey, CONFIG_SELECT_WORD_ACTION, cast(s32) select_word_action);
+    if #complete select_word_action == {
+        case .CTRL_LEFT_SHIFT_RIGHT; #through;
+        case .CTRL_W; #through;
+        case .CTRL_D;
+
+        // If it's not a valid value reset it
+        case; select_word_action = .CTRL_LEFT_SHIFT_RIGHT;
+    }
 
     consecutive_press_interval_ms = read_config_option(hkey, CONFIG_CONSECUTIVE_PRESS_INTERVAL, consecutive_press_interval_ms);
     consecutive_press_interval = cast(float64) consecutive_press_interval_ms / 1000.0;
@@ -896,6 +978,7 @@ SendInput :: (cInputs: u32, pInputs: *INPUT, cbSize: s32) -> u32 #foreign user32
 sndPlaySoundA :: (lpszSound: *void, flags: u32) #foreign winmm;
 RegCreateKeyExA :: (hKey: HKEY, lpSubKey: LPCSTR, Reserved: DWORD, lpClass: LPSTR, dwOptions: DWORD, samDesired: REGSAM, lpSecurityAttributes: LPSECURITY_ATTRIBUTES, phkResult: *HKEY, lpdwDisposition: *s32) -> LSTATUS #foreign advapi32;
 RegSetValueExA :: (hkey: HKEY, lpSubKey: *u8, Reserved: DWORD, dwType: DWORD, lpData: *u8, cbData: DWORD) -> LSTATUS #foreign advapi32;
+MapVirtualKeyA :: (uCode: u32, uMapType: u32) -> u32 #foreign user32;
 
 advapi32 :: #system_library "Advapi32";
 kernel32 :: #system_library "kernel32";
@@ -915,6 +998,11 @@ SND_NODEFAULT :: 0x000002;
 SND_MEMORY ::    0x000004;
 SND_SYSTEM ::    0x200000;
 
+MAPVK_VK_TO_VSC ::    0x00;
+MAPVK_VSC_TO_VK_EX :: 0x03;
+MAPVK_VK_TO_VSC_EX :: 0x04;
+KEYEVENTF_EXTENDEDKEY :: 0x0001;
+KEYEVENTF_SCANCODE ::    0x0008;
 
 // Imports
 
