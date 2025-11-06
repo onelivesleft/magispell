@@ -1,0 +1,2 @@
+* Fix vestigal window showing (move it to -9999999,-9999999 probably)
+* Disallow key repeats for activation
