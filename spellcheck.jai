@@ -2,7 +2,7 @@
     APPLICATION_NAME :: "Magispell";
 else
     APPLICATION_NAME :: "Magispell (DEBUG)";
-VERSION :: "v1.01";
+VERSION :: "v1.02";
 APPLICATION_NAME_AND_VERSION :: #run sprint("% %", APPLICATION_NAME, VERSION);
 CONFIG_REGISTRY_SUBKEY :: "Software\\One Lives Left\\Magispell";
 // BUILD_MODE : enum { DEBUG; RELEASE; NO_OUTPUT; }; is inserted by build.jai
@@ -100,7 +100,7 @@ main :: () {
 
     window_width :: 512;
     window_height :: 512;
-    application_panel := gui_create_application_window(APPLICATION_NAME_AND_VERSION, window_width, window_height, flags=.START_MINIMIZED|.HAS_NOTIFICATION_ICON|.HIDE_FROM_TASKBAR);
+    application_panel := gui_create_application_window(APPLICATION_NAME_AND_VERSION, window_width, window_height, flags=.DEFAULT|.START_MINIMIZED|.HAS_NOTIFICATION_ICON|.HIDE_FROM_TASKBAR);
 
     hook = SetWindowsHookExA(WH_KEYBOARD_LL, global_keyboard_hook, null, 0);
     if !hook  exit(1);
@@ -438,7 +438,7 @@ update_key_tracker :: (using key_tracker: *Key_Tracker, key_event: Keyboard_Even
         if key_event.event_id == WM_KEYDOWN
             consecutive_press_count = 0;
     }
-    else if key_event.event_id == WM_KEYDOWN {
+    else if key_event.event_id == WM_KEYDOWN && last_released_frame_index >= last_pressed_frame_index {
         consecutive_pressed_interval = frame.time - last_pressed_at;
         if consecutive_pressed_interval <= consecutive_press_interval
             consecutive_press_count += 1;

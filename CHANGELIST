@@ -1,0 +1,9 @@
+# v1.02
+* Fix vestigal window showing.
+* Disallow key repeats for activation.
+
+# v1.01
+* Different select word key-send styles.
+
+# v1.00
+* Basically working.
